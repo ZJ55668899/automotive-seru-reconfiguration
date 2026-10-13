@@ -144,7 +144,7 @@ def crossover(inst: Instance, a: Config, b: Config, rng: np.random.Generator) ->
             team_map[int(k)] = amap.get(int(k), 0)
         else:
             team_map[int(k)] = bmap.get(int(k) - a.n_seru, 0)
-    child = _relabel(labels, team_map, check=False)
+    child = _relabel(labels, team_map)
     fixed = restore(inst, child, rng)
     if fixed is None or not in_omega_st(inst, fixed):
         return a.copy()  # fall back to the parent clone
@@ -195,7 +195,7 @@ def restore(inst: Instance, cfg: Config, rng: np.random.Generator,
                     new_label = int(labels.max()) + 1
                     labels[list(comp)] = new_label
                     changed = True
-            cfg = _relabel(labels, _team_map(cfg), check=False)
+            cfg = _relabel(labels, _team_map(cfg))
             break
         # C4 repair: every seru needs its own compatible team; resolve
         # duplicate teams and uncovered serus by feasible reassignments
@@ -243,7 +243,7 @@ def check_c4_flag(inst: Instance, cfg: Config) -> bool:
     return _c4(inst, cfg)
 
 
-def _relabel(labels: np.ndarray, team_map: dict[int, int], check: bool = True) -> Config:
+def _relabel(labels: np.ndarray, team_map: dict[int, int]) -> Config:
     """Renumber seru labels to 0..K-1 and build the team vector."""
     labels = np.asarray(labels, int).copy()
     uniq = {old: new for new, old in enumerate(sorted(set(labels.tolist())))}

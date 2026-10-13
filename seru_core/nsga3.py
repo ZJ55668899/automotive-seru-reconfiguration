@@ -46,7 +46,6 @@ class SearchConfig:
     max_hours: float = 8.0
     final_reps: int = 20              # R replications for the final front
     ref_p: int = 4                    # Das-Dennis partition (15 directions)
-    nsga3_seed: int = 0
 
 
 @dataclass
