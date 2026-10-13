@@ -10,6 +10,7 @@ This repository is the official implementation of "基于分阶段约束处理�
 - numpy >= 1.26
 - simpy >= 4.0
 - deap >= 1.4
+- matplotlib >= 3.8
 
 Tested with Python 3.14, numpy 2.4, SimPy 4.1, DEAP 1.4.
 
@@ -26,6 +27,23 @@ Tested with Python 3.14, numpy 2.4, SimPy 4.1, DEAP 1.4.
 - 端到端演示（小规模算例，秒级完成，输出Pareto候选集）：
 
   `python examples/run_demo.py`
+
+- 演示并输出Pareto前沿图：
+
+  `python examples/plot_demo_front.py`（生成 `examples/demo_front.png`）
+
+演示输出示例：
+
+```text
+instance S-demo: N=12, teams=9, serus in X_prev=2, lambda=0.098/min
+X_prev: f1=9.28 h, f2=0.0 kCNY, f3=0.196, rho=4.402%, orders=59
+search: 15 generations, 50 full DES calls, wall clock 0.0 min
+final front (DES-verified, R=3 replications):
+  K=5: f1=8.11 h, f2=35.1 kCNY, f3=0.299, rho=8.987%±4.42%
+  K=7: f1=8.14 h, f2=40.1 kCNY, f3=0.244, rho=8.959%±4.40%
+  ...
+total wall clock: 1.9 s
+```
 
 ## Citation
 
