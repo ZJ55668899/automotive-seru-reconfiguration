@@ -123,6 +123,9 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
     """The full search loop of Algorithm 2."""
     sc = sc or SearchConfig()
     rng = np.random.default_rng(alg_seed)
+    # DEAP's selNSGA3 breaks niche ties through numpy's global RNG; seed it so
+    # that runs are reproducible across processes.
+    np.random.seed((alg_seed * 2654435761) % (2 ** 32))
     t_start = time.time()
 
     archive_x: list[np.ndarray] = []      # features of DES-evaluated configs
