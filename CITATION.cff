@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Core code for: A staged constraint-handling approach to dynamic reconfiguration of automotive final-assembly seru production systems"
+authors:
+  - family-names: Wen
+    given-names: Zijun
+  - family-names: Xiang
+    given-names: Dong
+license: MIT
