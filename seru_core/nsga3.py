@@ -267,9 +267,13 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
     pop_fit_arr = np.array(pop_fit)
     front_idx = _non_dominated(pop_fit_arr)
     front = [pop[i] for i in front_idx]
+    # drop duplicate configurations so each returned front member is distinct
+    seen_cfg: set[tuple] = set()
+    front = [c for c in front
+             if (key := (c.labels.tobytes(), c.team_of.tobytes())) not in seen_cfg
+             and not seen_cfg.add(key)]
     final_obj, rho_reps = [], []
-    for i in front_idx:
-        cfg = pop[i]
+    for cfg in front:
         reps = [evaluate(inst, cfg, x_prev, seed=sim_seed + 7919 * (r + 1))
                 for r in range(sc.final_reps)]
         final_obj.append(np.mean([r.as_objectives() for r in reps], axis=0))
