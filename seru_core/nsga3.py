@@ -4,11 +4,14 @@ Driver of the three modules: candidate generation (operators.py), DES
 evaluation (des.py) and surrogate pre-screening (surrogate.py).
 
 Per generation: crossover + operator mutation -> surrogate prediction ->
-infill selection of 10% offspring by Eq. (14) -> full DES for the infill set
-(common random numbers within the generation) -> NSGA-III environmental
-selection.  Error trigger (MAPE of the last 50 evaluations > eps_max) and
-periodic full-population DES checks recalibrate the surrogate; the final
-Pareto front is re-evaluated with R independent replications.
+infill selection of 10% offspring by Eq. (14) (predicted promise AND high
+uncertainty) -> full DES for the infill set (common random numbers within
+the generation) -> NSGA-III environmental selection.  Error trigger (MAPE
+of the last 50 evaluations > eps_max) and periodic full-population DES
+checks recalibrate the surrogate; termination is decided on the hypervolume
+of the DES-verified archive.  The final Pareto front is re-evaluated with R
+independent replications, filtered by the executability test (mean rho <=
+tau), and re-screened for non-dominance before being returned.
 """
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ class SearchConfig:
     max_hours: float = 8.0
     final_reps: int = 20              # R replications for the final front
     ref_p: int = 4                    # Das-Dennis partition (15 directions)
+    tau: float = 0.05                 # executability threshold on mean rho
 
 
 @dataclass
@@ -53,6 +57,7 @@ class SearchResult:
     front: list[Config]
     objectives: np.ndarray           # (n_front, 3) DES-verified objectives
     rho: np.ndarray                  # (n_front, R) stall ratios per replication
+    executable: np.ndarray           # (n_front,) bool: mean rho <= tau
     n_des_calls: int                 # full DES calls spent during the search
     generations: int
     wall_clock_h: float
@@ -147,6 +152,7 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
         pop_fit.append(np.array(res.as_objectives()))
         archive_x.append(features(inst, cfg, x_prev))
         archive_y.append(pop_fit[-1])
+    pop_true = [True] * len(pop)      # initial population is fully DES-verified
     surrogate.fit_with_gram(np.array(archive_x), np.array(archive_y))
 
     ref_points = tools.uniform_reference_points(3, p=sc.ref_p)
@@ -167,42 +173,63 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
         offspring = [random_operator(inst, c, rng) for c in offspring]
         offspring = offspring[: sc.pop_size]
 
-        # surrogate prediction + infill selection by Eq. (14)
+        # surrogate prediction + infill selection by Eq. (14): high psi =
+        # promising predicted objectives AND high uncertainty (exploration)
         x_off = np.array([features(inst, c, x_prev) for c in offspring])
         y_hat, u_hat = surrogate.predict(x_off)
         ranks = _norm_ranks(y_hat)
         u_norm = u_hat.mean(1)
         u_norm = u_norm / (u_norm.max() + 1e-12)
-        psi = 0.5 * (1 - ranks) + 0.5 * (1 - u_norm)
+        psi = 0.5 * (1 - ranks) + 0.5 * u_norm
         n_infill = max(1, int(round(sc.infill_share * len(offspring))))
         infill_idx = np.argsort(-psi)[:n_infill]
 
         periodic = (gen % sc.g_ctrl == 0)
         off_fit: list[np.ndarray] = list(np.array(y_hat))
-        for i, cfg in enumerate(offspring):
+        off_true = [False] * len(offspring)
+
+        def verify(i: int):
+            res = full_des(offspring[i])
+            true = np.array(res.as_objectives())
+            err = np.abs(true - y_hat[i]) / np.maximum(np.abs(true), 1e-12)
+            err_window.append(float(err.mean()))
+            archive_x.append(x_off[i])
+            archive_y.append(true)
+            off_fit[i] = true
+            off_true[i] = True
+
+        for i in range(len(offspring)):
             if i in infill_idx or periodic:
-                res = full_des(cfg)
-                true = np.array(res.as_objectives())
-                err = np.abs(true - y_hat[i]) / np.maximum(np.abs(y_hat[i]), 1e-12)
-                err_window.append(float(err.mean()))
-                archive_x.append(x_off[i])
-                archive_y.append(true)
-                off_fit[i] = true
+                verify(i)
+        # periodic full-population check: parents that still carry predicted
+        # fitness are re-evaluated as well, so every population member holds
+        # DES-verified objectives after a control generation
+        if periodic:
+            for i, cfg in enumerate(pop):
+                if not pop_true[i]:
+                    res = full_des(cfg)
+                    pop_fit[i] = np.array(res.as_objectives())
+                    pop_true[i] = True
+                    archive_x.append(features(inst, cfg, x_prev))
+                    archive_y.append(pop_fit[i])
         surrogate.fit_with_gram(np.array(archive_x), np.array(archive_y))
 
         # error trigger: full-population DES for this generation if MAPE too high
         if len(err_window) >= 50 and np.mean(err_window[-50:]) > sc.eps_max:
-            for i, cfg in enumerate(offspring):
-                res = full_des(cfg)
-                off_fit[i] = np.array(res.as_objectives())
-                archive_x.append(x_off[i])
-                archive_y.append(off_fit[i])
+            for i in range(len(offspring)):
+                if not off_true[i]:
+                    res = full_des(offspring[i])
+                    off_fit[i] = np.array(res.as_objectives())
+                    off_true[i] = True
+                    archive_x.append(x_off[i])
+                    archive_y.append(off_fit[i])
             surrogate.fit_with_gram(np.array(archive_x), np.array(archive_y))
             err_window.clear()
 
         # NSGA-III environmental selection over parent union offspring
         union_fit = np.array(pop_fit + off_fit)
         union_pop = pop + offspring
+        union_true = pop_true + off_true
         inds = []
         for idx, fit in enumerate(union_fit):
             ind = creator.SeruIndividual([idx])
@@ -217,15 +244,18 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
         sel_idx = [int(ind[0]) for ind in chosen]
         pop = [union_pop[i] for i in sel_idx]
         pop_fit = [union_fit[i] for i in sel_idx]
+        pop_true = [union_true[i] for i in sel_idx]
 
         # ---- 3. termination check ------------------------------------------------
-        front_idx = _non_dominated(np.array(pop_fit))
-        hv = _hypervolume_2d_proxy(np.array(pop_fit)[front_idx])
+        # HV is computed on the DES-verified archive only (Section 4.4);
+        # hv_trace holds one entry per generation, so the 20-generation window
+        # is the entry 20 positions back.
+        arch = np.array(archive_y)
+        hv = _hypervolume_2d_proxy(arch[_non_dominated(arch)])
         hv_trace.append(hv)
         if gen > sc.warmup_gen and gen % sc.check_every == 0:
-            if len(hv_trace) > sc.hv_patience // sc.check_every:
-                ref_idx = -1 - sc.hv_patience // sc.check_every
-                ref_hv = hv_trace[ref_idx]
+            if len(hv_trace) > sc.hv_patience:
+                ref_hv = hv_trace[-1 - sc.hv_patience]
                 if ref_hv > 0 and (hv - ref_hv) / ref_hv < sc.hv_tol:
                     break
             best_hv = max(best_hv, hv)
@@ -244,8 +274,26 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
                 for r in range(sc.final_reps)]
         final_obj.append(np.mean([r.as_objectives() for r in reps], axis=0))
         rho_reps.append([r.rho for r in reps])
+    final_obj = np.array(final_obj)
+    rho_reps = np.array(rho_reps)
 
-    return SearchResult(front=front, objectives=np.array(final_obj),
-                        rho=np.array(rho_reps), n_des_calls=n_des,
+    # Algorithm 2, final step: keep configurations that pass the executability
+    # test (C1/C4 hold by construction via Prop. 2; mean rho over the R
+    # replications must not exceed tau), then re-screen for non-dominance on
+    # the DES-verified objectives.
+    executable = rho_reps.mean(1) <= sc.tau
+    if executable.any():
+        idx_exec = np.where(executable)[0]
+        idx_nd = _non_dominated(final_obj[executable])
+        keep = idx_exec[idx_nd]
+    else:
+        # no configuration meets tau under the recheck: return the rechecked
+        # non-dominated set with executable=False throughout, so callers can
+        # see the best-effort front and its failed verification
+        keep = _non_dominated(final_obj)
+
+    return SearchResult(front=[front[i] for i in keep],
+                        objectives=final_obj[keep], rho=rho_reps[keep],
+                        executable=executable[keep], n_des_calls=n_des,
                         generations=gen, wall_clock_h=(time.time() - t_start) / 3600,
                         hv_trace=hv_trace)

@@ -37,10 +37,14 @@ def main() -> None:
     res = surrogate_assisted_nsga3(inst, x_prev, sim_seed=7, alg_seed=1, sc=sc)
     print(f"search: {res.generations} generations, {res.n_des_calls} full DES "
           f"calls, wall clock {res.wall_clock_h*60:.1f} min")
-    print("final front (DES-verified, R=3 replications):")
-    for cfg, obj, rho in zip(res.front, res.objectives, res.rho):
+    n_exec = int(res.executable.sum())
+    print(f"final front (DES-verified, R=3 replications; "
+          f"{n_exec}/{len(res.front)} executable at tau={sc.tau:.0%}):")
+    for cfg, obj, rho, ok in zip(res.front, res.objectives, res.rho,
+                                 res.executable):
+        flag = "executable" if ok else "NOT executable (best-effort)"
         print(f"  K={cfg.n_seru}: f1={obj[0]/60:.2f} h, f2={obj[1]:.1f} kCNY, "
-              f"f3={obj[2]:.3f}, rho={rho.mean():.3%}±{rho.std():.2%}")
+              f"f3={obj[2]:.3f}, rho={rho.mean():.3%}±{rho.std():.2%}  [{flag}]")
     print(f"total wall clock: {(time.time()-t0):.1f} s")
 
 
