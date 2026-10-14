@@ -12,7 +12,8 @@ nsga3        surrogate-assisted NSGA-III with error control (Algorithm 2)
 """
 
 from .instances import Instance, initial_config, make_instance
-from .constraints import Config, check_c1, check_c4, in_omega_st
+from .constraints import (Config, check_c1, check_c4, fixtures_anchored,
+                          in_omega_st)
 from .operators import (crossover, merge, random_operator, reassign, restore,
                         split, warm_start)
 from .des import DESResult, evaluate

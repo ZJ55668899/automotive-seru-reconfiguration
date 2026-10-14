@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constraints import (Config, check_c1, diameter_ok, in_omega_st,
-                          is_connected, seru_stations)
+from .constraints import (Config, check_c1, diameter_ok, fixtures_anchored,
+                          in_omega_st, is_connected, seru_stations)
 from .instances import Instance, team_compatible
 
 
@@ -114,9 +114,12 @@ def reassign(inst: Instance, cfg: Config, k: int, rng: np.random.Generator) -> C
     return None
 
 
-def random_operator(inst: Instance, cfg: Config, rng: np.random.Generator) -> Config:
+def random_operator(inst: Instance, cfg: Config, rng: np.random.Generator,
+                    x_prev: Config | None = None) -> Config:
     """One mutation step: uniformly choose merge / split / reassign; apply only
-    when its execution conditions hold, otherwise keep the input (Alg. 1)."""
+    when its execution conditions hold, otherwise keep the input (Alg. 1).
+    When x_prev is given, fixed-tooling stations must stay anchored to their
+    incumbent seru (C1, constraints.fixtures_anchored)."""
     ops = ["merge", "split", "reassign"]
     rng.shuffle(ops)
     for op in ops:
@@ -129,14 +132,18 @@ def random_operator(inst: Instance, cfg: Config, rng: np.random.Generator) -> Co
             out = reassign(inst, cfg, int(rng.integers(cfg.n_seru)), rng)
         else:
             out = None
-        if out is not None and in_omega_st(inst, out):
+        if (out is not None and in_omega_st(inst, out)
+                and (x_prev is None or fixtures_anchored(inst, out, x_prev))):
             return out
     return cfg
 
 
-def crossover(inst: Instance, a: Config, b: Config, rng: np.random.Generator) -> Config:
+def crossover(inst: Instance, a: Config, b: Config, rng: np.random.Generator,
+              x_prev: Config | None = None) -> Config:
     """Single-point crossover on seru labels followed by restore(); the child
-    inherits each seru's team from the parent contributing the larger part."""
+    inherits each seru's team from the parent contributing the larger part.
+    When x_prev is given, children that unanchor a fixed-tooling station are
+    rejected and the parent clone is returned."""
     n = inst.n_stations
     cut = int(rng.integers(1, n))
     labels = np.concatenate([a.labels[:cut], b.labels[cut:] + a.n_seru])
@@ -149,7 +156,8 @@ def crossover(inst: Instance, a: Config, b: Config, rng: np.random.Generator) ->
             team_map[int(k)] = bmap.get(int(k) - a.n_seru, 0)
     child = _relabel(labels, team_map)
     fixed = restore(inst, child, rng)
-    if fixed is None or not in_omega_st(inst, fixed):
+    if (fixed is None or not in_omega_st(inst, fixed)
+            or (x_prev is not None and not fixtures_anchored(inst, fixed, x_prev))):
         return a.copy()  # fall back to the parent clone
     return fixed
 
@@ -261,11 +269,12 @@ def _relabel(labels: np.ndarray, team_map: dict[int, int]) -> Config:
 def warm_start(inst: Instance, base: Config, rng: np.random.Generator,
                pop_size: int) -> list[Config]:
     """Initial population: 1-3 feasible adjustment operations from X_prev
-    (Section 4.2, warm start around the current configuration)."""
+    (Section 4.2, warm start around the current configuration).  Fixed-tooling
+    stations stay anchored to their incumbent seru."""
     pop = [base.copy()]
     while len(pop) < pop_size:
         cfg = base.copy()
         for _ in range(int(rng.integers(1, 4))):
-            cfg = random_operator(inst, cfg, rng)
+            cfg = random_operator(inst, cfg, rng, base)
         pop.append(cfg)
     return pop

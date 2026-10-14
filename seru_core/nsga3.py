@@ -163,14 +163,15 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
     # ---- 2. main loop ------------------------------------------------------------
     while gen < sc.max_gen and (time.time() - t_start) < sc.max_hours * 3600:
         gen += 1
-        # crossover + operator mutation (feasibility preserved by Prop. 2)
+        # crossover + operator mutation (feasibility preserved by Prop. 2,
+        # fixed-tooling stations anchored to their incumbent seru)
         offspring: list[Config] = []
         parents = list(range(len(pop)))
         rng.shuffle(parents)
         for a, b in zip(parents[0::2], parents[1::2]):
-            offspring.append(crossover(inst, pop[a], pop[b], rng))
-            offspring.append(crossover(inst, pop[b], pop[a], rng))
-        offspring = [random_operator(inst, c, rng) for c in offspring]
+            offspring.append(crossover(inst, pop[a], pop[b], rng, x_prev))
+            offspring.append(crossover(inst, pop[b], pop[a], rng, x_prev))
+        offspring = [random_operator(inst, c, rng, x_prev) for c in offspring]
         offspring = offspring[: sc.pop_size]
 
         # surrogate prediction + infill selection by Eq. (14): high psi =
