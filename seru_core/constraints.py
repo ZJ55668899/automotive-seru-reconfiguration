@@ -116,6 +116,19 @@ def station_change_mask(cfg: Config, x_prev: Config) -> np.ndarray:
     return mapped != x_prev.labels
 
 
+def fixtures_anchored(inst: Instance, cfg: Config, x_prev: Config) -> bool:
+    """Fixed-tooling stations keep their current seru membership (C1): the
+    unit holding a fixed-tooling station must map by largest overlap back to
+    that station's incumbent unit.  Fixed tooling pins the station to its
+    current seru, so raising the fixture share shrinks the feasible
+    neighbourhood (Section 5.10)."""
+    fx = np.where(inst.fixtures)[0]
+    if len(fx) == 0:
+        return True
+    mapped = unit_match_to_prev(cfg, x_prev)
+    return bool(np.all(mapped[cfg.labels[fx]] == x_prev.labels[fx]))
+
+
 def compatibility_matrix(inst: Instance) -> np.ndarray:
     """Xi in {0,1}^{N x T}: 1 iff team t can serve station i (computed once
     per instance, Section 4.2)."""

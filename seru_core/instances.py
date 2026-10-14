@@ -169,13 +169,19 @@ def _agv_network(coords: np.ndarray, rng: np.random.Generator):
 
 
 def make_instance(n_stations: int, size_class: str, seed: int,
-                  name: str | None = None) -> Instance:
-    """Generate one synthetic instance following the Table 4 parameterisation."""
+                  name: str | None = None,
+                  fixture_share: float | None = None) -> Instance:
+    """Generate one synthetic instance following the Table 4 parameterisation.
+
+    fixture_share overrides the Table 4 default (0.30); the fixture flags pin
+    the corresponding stations to their incumbent seru (see
+    constraints.fixtures_anchored)."""
     rng = np.random.default_rng(seed)
     coords = _u_line_coords(n_stations)
     adjacency = _adjacency(coords)
     base_time = rng.uniform(30.0, 90.0, n_stations)          # seconds
-    fixtures = rng.random(n_stations) < FIXTURE_SHARE
+    share = FIXTURE_SHARE if fixture_share is None else fixture_share
+    fixtures = rng.random(n_stations) < share
     skill_req = rng.beta(*STATION_REQ_BETA, (n_stations, SKILL_DIM))
     crew_req = rng.integers(1, 5, n_stations)
     k_max = math.ceil(n_stations / 3) + 2
