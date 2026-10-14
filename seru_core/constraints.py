@@ -141,7 +141,7 @@ def compatibility_matrix(inst: Instance) -> np.ndarray:
 
 # ------------------------------------------------------- C2 rule checkers
 # The DES evaluates these on the evolving output sequence; the pure rule
-checks live here so that the dispatcher and the auditor share one source.
+# checks live here so that the dispatcher and the auditor share one source.
 
 def spacing_ok(seq_tail: list[int], candidate: int, p: int = 2, q: int = 3) -> bool:
     """Sliding-window spacing rule (Eq. 4): at most p vehicles of the same
