@@ -17,13 +17,15 @@ from dataclasses import dataclass, field
 import numpy as np
 import simpy
 
-from .constraints import (Config, seru_stations, spacing_ok,
+from .constraints import (Config, check_c1, check_c4, diameter_ok,
+                          is_connected, seru_stations, spacing_ok,
                           station_change_mask, unit_match_to_prev)
 from .instances import (AGV_LOAD_MIN, AGV_SPEED_MPS, COST_ALPHA, COST_BETA,
                         COST_GAMMA, DEADLOCK_RECOVERY_MEAN_MIN, Instance,
                         LEARNING_ETA0, LEARNING_THETA_MIN, LOOKAHEAD_W, MIX,
                         SETUP_BUDGET_MIN, SETUP_RANGE_MIN, T_FLUSH_MIN,
-                        THETA_WAIT_MIN, T_SHIFT_MIN, URGENT_LEAD, URGENT_SHARE)
+                        THETA_WAIT_MIN, T_SHIFT_MIN, URGENT_LEAD, URGENT_SHARE,
+                        team_compatible)
 
 # after this much continuous dispatch stalling the window is forcibly released
 # (documented deadlock-avoidance fallback of the reference implementation)
@@ -43,6 +45,10 @@ class DESResult:
     events: dict = field(default_factory=dict)   # class -> [durations]
     n_orders: int = 0
     stall_by_class: dict = field(default_factory=dict)
+    n_urgent_fail: int = 0         # Eq. 6 violations (urgent past due position)
+    n_struct_fail: int = 0         # C1/C4 structural violation marks
+    out_order: list = field(default_factory=list)   # order ids by completion
+    rel_order: list = field(default_factory=list)   # order ids by release
 
     def as_objectives(self) -> tuple[float, float, float]:
         return self.f1, self.f2, self.f3
@@ -86,7 +92,7 @@ class AGVManager:
         self.waiting_for: dict[int, tuple] = {}   # task id -> requested segment
         self.holder: dict[tuple, set] = {}        # segment -> task ids inside
 
-    def _alt_route(self, a: int, b: int, banned: set) -> list:
+    def _alt_route(self, a: int, b: int, banned: set, fallback: list) -> list:
         """Shortest path avoiding currently full segments (rerouting)."""
         adj: dict[int, list[int]] = {}
         for (u, v) in self.seg_res:
@@ -102,7 +108,7 @@ class AGVManager:
                     prev[v] = u
                     q.append(v)
         if b not in prev:
-            return self.inst.agv_routes[(a, b)]
+            return fallback
         path, u = [], b
         while prev[u] is not None:
             path.append((prev[u], u))
@@ -146,7 +152,7 @@ class AGVManager:
                 route = (route_override if route_override is not None
                          else self.inst.agv_routes[(cur, goal)])
                 route_override = None          # consumed by this iteration
-                for seg in route:
+                for si, seg in enumerate(route):
                     res = self.seg_res[seg]
                     req = res.request()
                     self.waiting_for[task] = seg
@@ -164,7 +170,8 @@ class AGVManager:
                             DEADLOCK_RECOVERY_MEAN_MIN))
                         yield self.env.timeout(rec)
                         self.stats.stall("C3_deadlock", t0, self.env.now)
-                        route_override = self._alt_route(cur, goal, set())
+                        route_override = self._alt_route(cur, goal, set(),
+                                                         route[si:])
                         break
                     got = yield req | self.env.timeout(THETA_WAIT_MIN)
                     self.waiting_for.pop(task, None)
@@ -176,16 +183,25 @@ class AGVManager:
                             req.cancel()
                         full = {s for s, r in self.seg_res.items()
                                 if r.count >= r.capacity}
-                        alt = self._alt_route(cur, goal, full)
-                        if alt != route:
+                        # compare against the REMAINING route from cur, not
+                        # the full original route — otherwise a no-bypass case
+                        # would look like a route change
+                        alt = self._alt_route(cur, goal, full, route[si:])
+                        if alt != route[si:]:
                             # take the bypass from cur onward; the threshold
                             # crossing itself is recorded as a C3 event
                             self.stats.stall("C3_block", t0, t0)
                             route_override = alt
                             break
-                        # no better path: keep waiting on the same segment
+                        # no better path: keep waiting on the same segment;
+                        # the wait edge stays registered so the wait-for graph
+                        # still sees this task during the second wait
                         req2 = res.request()
+                        self.waiting_for[task] = seg
                         yield req2
+                        self.waiting_for.pop(task, None)
+                        # one continuous wait: stall runs from the first
+                        # threshold crossing to the grant
                         self.stats.stall("C3_block", t0, self.env.now)
                         req = req2
                     # entered seg: release the segment we came from
@@ -231,6 +247,21 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
     rng = np.random.default_rng(seed)
     env = simpy.Environment()
     stats = _Stats(rng)
+
+    # structural audit: C1/C4 are hard implementation conditions.  A baseline
+    # that skips generation-time checks may hand over a violating config; the
+    # DES still runs it counterfactually (operating metrics stay comparable),
+    # but every violating unit is recorded as a zero-duration structural event
+    # and the config must not count as executable downstream.
+    for k in range(cfg.n_seru):
+        st = seru_stations(cfg, k)
+        if not (is_connected(inst, st) and diameter_ok(inst, st)):
+            stats.events.setdefault("C1_struct", []).append(0.0)
+        if not team_compatible(inst, int(cfg.team_of[k]), st):
+            stats.events.setdefault("C4_struct", []).append(0.0)
+    _teams = [int(t) for t in cfg.team_of[: cfg.n_seru]]
+    if len(set(_teams)) != len(_teams):
+        stats.events.setdefault("C4_struct", []).append(0.0)
 
     # ---- transition at time zero (Eq. 10 ingredients) ------------------------
     # N_aff compares physical unit identity (largest-overlap mapping), so a
@@ -299,7 +330,8 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
             return 1.0 - (1.0 - LEARNING_ETA0) * np.exp(-now / LEARNING_THETA_MIN)
         return 1.0
 
-    def vehicle_proc(model: int, start_visit: int, start_station: int):
+    def vehicle_proc(model: int, start_visit: int, start_station: int,
+                     order_idx: int = -1):
         nonlocal t_down
         pos_v, pos_s = start_visit, start_station
         prev_exit: int | None = None
@@ -331,7 +363,7 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
             prev_exit = block[-1]
             pos_v += 1
             pos_s = 0
-        completion.append(env.now)
+        completion.append((order_idx, env.now))
 
     # ---- WIP: flush across changed boundaries, keep in place otherwise ---------
     wip_kept = 0
@@ -355,7 +387,7 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
         else:
             wip_kept += 1
             vidx = next(v for v, (k, ss) in enumerate(visits) if st_idx in ss)
-            env.process(vehicle_proc(m, vidx, st_idx))
+            env.process(vehicle_proc(m, vidx, st_idx, -1))
 
     # ---- dispatch under C2 ---------------------------------------------------------
     released_seq: list[int] = []     # released order indices in sequence
@@ -436,7 +468,7 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
                 # recorded as a C2 violation (zero-length event mark)
                 stats.stall("C2_urgent", env.now, env.now)
             released += 1
-            env.process(vehicle_proc(model, 0, 0))
+            env.process(vehicle_proc(model, 0, 0, i_sel))
         while len(completion) < released + wip_kept:
             yield env.timeout(0.5)
 
@@ -453,10 +485,18 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
     })
 
     # ---- metrics ---------------------------------------------------------------------
-    f1 = max(completion) if completion else T_SHIFT_MIN
+    f1 = max(t for _, t in completion) if completion else T_SHIFT_MIN
     f3 = float(busy.std() / busy.mean()) if busy.mean() > 0 else 0.0
     t_cid = stats.union.total
     f2 = COST_ALPHA * n_aff + COST_BETA * n_move + COST_GAMMA * t_down / 60.0
+    # completion order of order-book orders (auditable against the release
+    # order; kept-WIP markers (-1) are excluded from the sequence comparison)
+    out_order = [i for i, _ in sorted(completion, key=lambda ct: ct[1])
+                 if i >= 0]
     return DESResult(f1=f1, f2=f2, f3=f3, rho=t_cid / f1 if f1 > 0 else 0.0,
                      t_cid=t_cid, events=stats.events, n_orders=n_orders,
-                     stall_by_class=stats.by_class)
+                     stall_by_class=stats.by_class,
+                     n_urgent_fail=len(stats.events.get("C2_urgent", [])),
+                     n_struct_fail=len(stats.events.get("C1_struct", []))
+                                  + len(stats.events.get("C4_struct", [])),
+                     out_order=out_order, rel_order=list(released_seq))
