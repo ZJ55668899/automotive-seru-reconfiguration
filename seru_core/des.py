@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import simpy
 
-from .constraints import Config, seru_stations, spacing_ok
+from .constraints import (Config, seru_stations, spacing_ok,
+                          station_change_mask, unit_match_to_prev)
 from .instances import (AGV_LOAD_MIN, AGV_SPEED_MPS, COST_ALPHA, COST_BETA,
                         COST_GAMMA, DEADLOCK_RECOVERY_MEAN_MIN, Instance,
                         LEARNING_ETA0, LEARNING_THETA_MIN, LOOKAHEAD_W, MIX,
@@ -211,19 +212,13 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
     stats = _Stats(rng)
 
     # ---- transition at time zero (Eq. 10 ingredients) ------------------------
-    n_aff = int(np.sum(cfg.labels != x_prev.labels))
-    best_prev: dict[int, int] = {}
-    for k in range(cfg.n_seru):
-        members = set(seru_stations(cfg, k).tolist())
-        best, best_k = -1, -1
-        for kp in range(x_prev.n_seru):
-            ov = len(members & set(seru_stations(x_prev, kp).tolist()))
-            if ov > best:
-                best, best_k = ov, kp
-        best_prev[k] = best_k
+    # N_aff compares physical unit identity (largest-overlap mapping), so a
+    # pure label renumbering of the same partition is zero-cost.
+    best_prev_arr = unit_match_to_prev(cfg, x_prev)
+    best_prev = {k: int(best_prev_arr[k]) for k in range(cfg.n_seru)}
+    n_aff = int(station_change_mask(cfg, x_prev).sum())
     moved = {k for k in range(cfg.n_seru)
-             if best_prev[k] >= 0
-             and int(cfg.team_of[k]) != int(x_prev.team_of[best_prev[k]])}
+             if int(cfg.team_of[k]) != int(x_prev.team_of[best_prev[k]])}
     n_move = len(moved)
     t_down = 0.0   # transition downtime in minutes (Eq. 10, third term)
 
@@ -306,7 +301,12 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
                     yield env.timeout(pt)
                     if k in moved:
                         t_down += pt - proc[s, model]
-                    busy[k] += pt
+                    # busy time integrates over the nominal shift horizon
+                    # [0, T_shift] only (Eq. 11); work spilling past the shift
+                    # end does not enter the load-balance objective
+                    done = env.now
+                    busy[k] += max(0.0, min(done, T_SHIFT_MIN)
+                                   - min(done - pt, T_SHIFT_MIN))
             prev_exit = block[-1]
             pos_v += 1
             pos_s = 0
@@ -399,7 +399,10 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
             if d > 0:
                 yield env.timeout(d)         # changeover time at release
                 over = max(0.0, state["cum_setup"] + d - SETUP_BUDGET_MIN)
-                if over > 0:                 # excess over the budget is a stall
+                if over > 0:
+                    # only the excess tail of THIS changeover (the last `over`
+                    # minutes) is recorded as a stall; earlier in-budget time
+                    # is never re-counted
                     stats.stall("C2_setup", env.now - over, env.now)
                 state["cum_setup"] += d
             released_seq.append(i_sel)

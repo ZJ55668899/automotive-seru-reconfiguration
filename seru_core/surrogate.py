@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .constraints import Config, seru_stations
+from .constraints import Config, seru_stations, station_change_mask
 from .instances import D_MAX_M, Instance, MODEL_COEF, MIX
 
 
@@ -61,7 +61,8 @@ def features(inst: Instance, cfg: Config, x_prev: Config) -> np.ndarray:
     caps = np.array([inst.agv_segments[s] for s in segs], float)
     util = flow / np.maximum(caps, 1)
     util_mean, util_max = float(util.mean()), float(util.max())
-    hamming = float(np.mean(cfg.labels != x_prev.labels))
+    # renumbering-invariant share of stations whose seru membership changed
+    hamming = float(station_change_mask(cfg, x_prev).mean())
     return np.array([k_cnt, sizes.mean(), sizes.std(), sizes.max(), density,
                      load_cv, margin_mean, margin_min, diams.mean(), diams.max(),
                      util_mean, util_max, hamming])
