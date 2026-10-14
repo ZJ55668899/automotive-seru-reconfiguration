@@ -127,31 +127,44 @@ class AGVManager:
     def transport(self, a: int, b: int, task: int):
         """Move one workpiece from station a to station b (C3 enforcement).
 
-        The AGV traverses the route segment by segment.  A wait longer than
-        theta_wait on a segment is recorded as a C3 stall and the remaining
-        route is replanned around the currently full segments; a cycle in the
-        wait-for graph triggers the deadlock-recovery backoff.
+        The AGV traverses the route segment by segment, holding its current
+        segment while it requests the next (hold-and-wait), so cycles in the
+        wait-for graph can actually form.  A wait longer than theta_wait on a
+        segment is recorded as a C3 stall and the remaining route is replanned
+        around the currently full segments — the bypass is then actually
+        taken.  A cycle triggers deadlock recovery: the AGV releases its held
+        segment (retreat to the spur), waits an exponential recovery time, and
+        replans.
         """
         with self.fleet.request() as agv:
             yield agv
             yield self.env.timeout(AGV_LOAD_MIN)
             cur, goal = a, b
+            route_override: list | None = None
+            held: tuple | None = None          # (segment, request) occupied now
             while cur != goal:
-                route = self.inst.agv_routes[(cur, goal)]
-                reroute = False
+                route = (route_override if route_override is not None
+                         else self.inst.agv_routes[(cur, goal)])
+                route_override = None          # consumed by this iteration
                 for seg in route:
                     res = self.seg_res[seg]
                     req = res.request()
                     self.waiting_for[task] = seg
-                    if self._cycle(task, seg):   # deadlock: back off, recover
+                    if self._cycle(task, seg):   # hold-and-wait cycle
                         self.waiting_for.pop(task, None)
                         req.cancel()
+                        # retreat: release the held segment so the cycle breaks
+                        if held is not None:
+                            hseg, hreq = held
+                            self.seg_res[hseg].release(hreq)
+                            self.holder[hseg].discard(task)
+                            held = None
+                        t0 = self.env.now
                         rec = float(self.stats.rng.exponential(
                             DEADLOCK_RECOVERY_MEAN_MIN))
-                        t0 = self.env.now
                         yield self.env.timeout(rec)
                         self.stats.stall("C3_deadlock", t0, self.env.now)
-                        reroute = True
+                        route_override = self._alt_route(cur, goal, set())
                         break
                     got = yield req | self.env.timeout(THETA_WAIT_MIN)
                     self.waiting_for.pop(task, None)
@@ -163,24 +176,32 @@ class AGVManager:
                             req.cancel()
                         full = {s for s, r in self.seg_res.items()
                                 if r.count >= r.capacity}
-                        if self._alt_route(cur, goal, full) != route:
-                            # reroute around full segments; the threshold-
-                            # exceeding event is counted with zero excess so far
+                        alt = self._alt_route(cur, goal, full)
+                        if alt != route:
+                            # take the bypass from cur onward; the threshold
+                            # crossing itself is recorded as a C3 event
                             self.stats.stall("C3_block", t0, t0)
-                            reroute = True       # replan around full segments
+                            route_override = alt
                             break
                         # no better path: keep waiting on the same segment
                         req2 = res.request()
                         yield req2
                         self.stats.stall("C3_block", t0, self.env.now)
                         req = req2
+                    # entered seg: release the segment we came from
+                    if held is not None:
+                        hseg, hreq = held
+                        self.seg_res[hseg].release(hreq)
+                        self.holder[hseg].discard(task)
                     self.holder.setdefault(seg, set()).add(task)
+                    held = (seg, req)
                     yield self.env.timeout(self.inst.segment_length[seg]
                                            / AGV_SPEED_MPS / 60.0)
-                    res.release(req)
-                    self.holder[seg].discard(task)
                     cur = seg[1]
-                # reroute: recompute from cur; otherwise the for-loop finished
+                # route_override set -> replan from cur; otherwise finished
+            if held is not None:
+                self.seg_res[held[0]].release(held[1])
+                self.holder[held[0]].discard(task)
             yield self.env.timeout(AGV_LOAD_MIN)
 
 
@@ -398,14 +419,22 @@ def evaluate(inst: Instance, cfg: Config, x_prev: Config, seed: int,
             d = 0.0 if prev_m < 0 else float(setup_delta[prev_m, model])
             if d > 0:
                 yield env.timeout(d)         # changeover time at release
-                over = max(0.0, state["cum_setup"] + d - SETUP_BUDGET_MIN)
+                # only the NEW excess introduced by this changeover counts;
+                # an already-exhausted budget must not backfill earlier time
+                prev_over = max(0.0, state["cum_setup"] - SETUP_BUDGET_MIN)
+                new_over = max(0.0, state["cum_setup"] + d - SETUP_BUDGET_MIN)
+                over = min(new_over - prev_over, d)
                 if over > 0:
-                    # only the excess tail of THIS changeover (the last `over`
-                    # minutes) is recorded as a stall; earlier in-budget time
-                    # is never re-counted
+                    # the excess tail of THIS changeover: at most d minutes,
+                    # always inside the current changeover interval
                     stats.stall("C2_setup", env.now - over, env.now)
                 state["cum_setup"] += d
             released_seq.append(i_sel)
+            if (orders[i_sel]["urgent"] and orders[i_sel]["due"] is not None
+                    and len(released_seq) > orders[i_sel]["due"]):
+                # Eq. 6 audit: urgent order released past its due position is
+                # recorded as a C2 violation (zero-length event mark)
+                stats.stall("C2_urgent", env.now, env.now)
             released += 1
             env.process(vehicle_proc(model, 0, 0))
         while len(completion) < released + wip_kept:
