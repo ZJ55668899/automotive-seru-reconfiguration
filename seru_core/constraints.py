@@ -90,6 +90,32 @@ def in_omega_st(inst: Instance, cfg: Config) -> bool:
     return check_c1(inst, cfg) and check_c4(inst, cfg)
 
 
+# ------------------------------------------------------- physical identity
+
+def unit_match_to_prev(cfg: Config, x_prev: Config) -> np.ndarray:
+    """Map each new seru unit to the previous unit with the largest station
+    overlap.  This gives units a physical identity: purely renumbering the
+    labels of an unchanged partition maps every unit onto itself."""
+    best_prev = np.zeros(cfg.n_seru, int)
+    for k in range(cfg.n_seru):
+        members = set(seru_stations(cfg, k).tolist())
+        best, best_k = -1, 0
+        for kp in range(x_prev.n_seru):
+            ov = len(members & set(seru_stations(x_prev, kp).tolist()))
+            if ov > best:
+                best, best_k = ov, kp
+        best_prev[k] = best_k
+    return best_prev
+
+
+def station_change_mask(cfg: Config, x_prev: Config) -> np.ndarray:
+    """Per-station membership change under the physical unit mapping
+    (Eq. 10, N_aff).  Invariant to label renumbering: swapping unit indices
+    without changing the partition yields an all-False mask."""
+    mapped = unit_match_to_prev(cfg, x_prev)[cfg.labels]
+    return mapped != x_prev.labels
+
+
 def compatibility_matrix(inst: Instance) -> np.ndarray:
     """Xi in {0,1}^{N x T}: 1 iff team t can serve station i (computed once
     per instance, Section 4.2)."""
@@ -102,7 +128,7 @@ def compatibility_matrix(inst: Instance) -> np.ndarray:
 
 # ------------------------------------------------------- C2 rule checkers
 # The DES evaluates these on the evolving output sequence; the pure rule
-# checks live here so that the dispatcher and the auditor share one source.
+checks live here so that the dispatcher and the auditor share one source.
 
 def spacing_ok(seq_tail: list[int], candidate: int, p: int = 2, q: int = 3) -> bool:
     """Sliding-window spacing rule (Eq. 4): at most p vehicles of the same

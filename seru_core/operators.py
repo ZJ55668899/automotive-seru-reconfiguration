@@ -44,7 +44,10 @@ def merge(inst: Instance, cfg: Config, k_from: int, k_to: int) -> Config | None:
         return None
     labels = cfg.labels.copy()
     labels[labels == k_from] = k_to
-    return _relabel(labels, {k_to: keep})
+    # keep every other unit's team; only the merged unit changes hands
+    assign = _team_map(cfg)
+    assign[k_to] = keep
+    return _relabel(labels, assign)
 
 
 def split(inst: Instance, cfg: Config, k: int, rng: np.random.Generator) -> Config | None:
