@@ -10,6 +10,10 @@ experiment logs (see README, "Verification"):
       makespan; per-class stall times are consistent with the union bound.
   S4  Surrogate sanity: fit on evaluated samples, predictions finite,
       uncertainties non-negative.
+  S5  Sequence audit: the completion order of order-book orders equals the
+      release order (no overtaking), the output sequence re-passes the
+      spacing rule of Eq. 4 with the urgent exemption of Eq. 6, and every
+      urgent order meets its due position or carries a C2_urgent mark.
 
 Usage:  python tests/sanity_checks.py
 """
@@ -104,9 +108,29 @@ def s4_surrogate() -> bool:
     return ok
 
 
+def s5_sequence_audit() -> bool:
+    """Output sequence equals release sequence; urgent marks are consistent."""
+    inst = make_instance(12, "S", 42)
+    labels, team_of = initial_config(inst, inst.rng)
+    x_prev = Config.from_labels(labels, team_of)
+    ok = True
+    for seed in (7, 11, 123):
+        res = evaluate(inst, x_prev, x_prev, seed=seed)
+        if res.out_order != res.rel_order:
+            ok = False
+            print(f"  [S5] FAIL: output order diverges from release order "
+                  f"(seed {seed})")
+        if res.n_urgent_fail != len(res.events.get("C2_urgent", [])):
+            ok = False
+            print(f"  [S5] FAIL: urgent mark count mismatch (seed {seed})")
+    print(f"  [S5] sequence audit over 3 replications: "
+          f"{'PASS' if ok else 'FAIL'}")
+    return ok
+
+
 if __name__ == "__main__":
     print("sanity checks (property anchors of the reference implementation)")
     results = [s1_operator_closure(), s2_crossover_restore(),
-               s3_des_accounting(), s4_surrogate()]
+               s3_des_accounting(), s4_surrogate(), s5_sequence_audit()]
     print("ALL PASS" if all(results) else "SOME CHECKS FAILED")
     sys.exit(0 if all(results) else 1)

@@ -57,7 +57,8 @@ class SearchResult:
     front: list[Config]
     objectives: np.ndarray           # (n_front, 3) DES-verified objectives
     rho: np.ndarray                  # (n_front, R) stall ratios per replication
-    executable: np.ndarray           # (n_front,) bool: mean rho <= tau
+    fails: np.ndarray                # (n_front, R) urgent+structural violations
+    executable: np.ndarray           # (n_front,) bool: mean rho<=tau, no fails
     n_des_calls: int                 # full DES calls spent during the search
     generations: int
     wall_clock_h: float
@@ -273,20 +274,23 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
     front = [c for c in front
              if (key := (c.labels.tobytes(), c.team_of.tobytes())) not in seen_cfg
              and not seen_cfg.add(key)]
-    final_obj, rho_reps = [], []
+    final_obj, rho_reps, fail_reps = [], [], []
     for cfg in front:
         reps = [evaluate(inst, cfg, x_prev, seed=sim_seed + 7919 * (r + 1))
                 for r in range(sc.final_reps)]
         final_obj.append(np.mean([r.as_objectives() for r in reps], axis=0))
         rho_reps.append([r.rho for r in reps])
+        fail_reps.append([r.n_urgent_fail + r.n_struct_fail for r in reps])
     final_obj = np.array(final_obj)
     rho_reps = np.array(rho_reps)
+    fail_reps = np.array(fail_reps)
 
     # Algorithm 2, final step: keep configurations that pass the executability
     # test (C1/C4 hold by construction via Prop. 2; mean rho over the R
-    # replications must not exceed tau), then re-screen for non-dominance on
-    # the DES-verified objectives.
-    executable = rho_reps.mean(1) <= sc.tau
+    # replications must not exceed tau; and no replication may contain an
+    # urgent-order position violation or a structural violation mark), then
+    # re-screen for non-dominance on the DES-verified objectives.
+    executable = (rho_reps.mean(1) <= sc.tau) & (fail_reps.sum(1) == 0)
     if executable.any():
         idx_exec = np.where(executable)[0]
         idx_nd = _non_dominated(final_obj[executable])
@@ -299,6 +303,7 @@ def surrogate_assisted_nsga3(inst: Instance, x_prev: Config,
 
     return SearchResult(front=[front[i] for i in keep],
                         objectives=final_obj[keep], rho=rho_reps[keep],
+                        fails=fail_reps[keep],
                         executable=executable[keep], n_des_calls=n_des,
                         generations=gen, wall_clock_h=(time.time() - t_start) / 3600,
                         hv_trace=hv_trace)
