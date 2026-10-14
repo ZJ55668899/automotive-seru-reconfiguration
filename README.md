@@ -43,7 +43,7 @@ instance S-demo: N=12, teams=9, serus in X_prev=2, lambda=0.098/min
 X_prev: f1=9.28 h, f2=0.0 kCNY, f3=0.123, rho=4.402%, orders=59
 search: 15 generations, 50 full DES calls, wall clock 0.0 min
 final front (DES-verified, R=3 replications; 0/7 executable at tau=5%):
-  K=2: f1=8.29 h, f2=7.8 kCNY, f3=0.034, rho=8.840%±4.40%  [NOT executable (best-effort)]
+  K=2: f1=8.29 h, f2=7.8 kCNY, f3=0.034, rho=8.832%±4.41%  [NOT executable (best-effort)]
   K=4: f1=8.10 h, f2=18.0 kCNY, f3=0.200, rho=9.002%±4.42%  [NOT executable (best-effort)]
   ...
 total wall clock: 1.5 s
